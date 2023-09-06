@@ -4,5 +4,5 @@ version := "1.0"
 
 name := "powermonitor"
 
-scalaVersion := "2.12.4"
+scalaVersion := "2.13.10"
 

@@ -47,6 +47,7 @@ import freechips.rocketchip.tilelink._
 import freechips.rocketchip.devices.tilelink._
 import freechips.rocketchip.util.{AsyncResetRegVec, Majority}
 
+import sifive.blocks.util._
 
 case class PowerMonitorParams(
   address: BigInt,
@@ -71,7 +72,10 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
         compat = Seq("ceiupm,pwrmon"),
         base = params.address,
         beatBytes = busWidthBytes),
-      new PMBusPort) {
+      new PMBusPort)
+    with HasInterruptSources {
+
+  def nInterrupts = 1
 
   lazy val module = new LazyModuleImp(this) {
 
@@ -89,7 +93,7 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
 
   // CSR
   val prescaler = Reg(init = UInt(0x0000FFFF, 32.W))
-  val ctrl_status = Reg(init = (new ControlStatusBundle).fromBits(0.U)))
+  val ctrl_status = Reg(init = (new ControlStatusBundle).fromBits(0.U))
   val data_addr = Reg(init = UInt(0, 32.W))
   val data = Reg(init = UInt(0, 32.W))
 
@@ -125,8 +129,8 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
   }
 
   // PMBus FSM
-  val s_comm_idle :: s_comm_start :: s_comm_addr :: s_comm_addr_ack :: s_comm_data :: 
-      s_comm_data_ack :: s_comm_wait :: s_comm_read :: s_comm_read_ack :: s_comm_stop :: Nil = Enum(UInt(), 10)
+  val (s_comm_idle :: s_comm_start :: s_comm_addr :: s_comm_addr_ack :: s_comm_data :: 
+      s_comm_data_ack :: s_comm_wait :: s_comm_read :: s_comm_read_ack :: s_comm_stop :: Nil) = Enum(UInt(), 10)
   val comm_state = Reg(init = s_comm_idle)
   val data_buffer = Reg(init = UInt(0, 8.W))
   val data_cnt = Reg(init = UInt(0, 3.W))
@@ -224,7 +228,7 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
 
   when(clk_en) { 
     freq_div := freq_div + 1.U
-    when(freq_div + 1.U === 0.U) pmbus_clk := !pmbus_clk
+    when(freq_div + 1.U === 0.U) { pmbus_clk := !pmbus_clk }
   }
 
   // CSR mapping
@@ -245,6 +249,8 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
   )
 
   ctrl_status.reserved := 0.U
+  
+  interrupts(0) := false.B
 }}
 
 class TLPowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(implicit p: Parameters)
