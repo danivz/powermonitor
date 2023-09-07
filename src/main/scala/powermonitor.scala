@@ -98,17 +98,25 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
   val data = Reg(init = UInt(0, 32.W))
 
   // Outputs
-  val pmbus_clk = Reg(init = false.B)
-  val pmbus_data = Reg(init = false.B)
+  val pmbus_clk = Reg(init = true.B)
+  val pmbus_data = Reg(init = true.B)
   port.clk.oe := !pmbus_clk
   port.data.oe := !pmbus_data
   port.clk.out := false.B
   port.data.out := false.B
 
-  // Main FSM
-  val s_main_idle :: s_main_acquire :: s_main_wait :: s_main_done :: Nil = Enum(UInt(), 4)
+  // FSMs
+  val s_main_idle :: s_main_acquire :: s_main_done :: Nil = Enum(UInt(), 3)
   val main_state = Reg(init = s_main_idle)
 
+  val (s_comm_idle :: s_comm_start :: s_comm_addr :: s_comm_addr_ack :: s_comm_data :: 
+      s_comm_data_ack :: s_comm_wait :: s_comm_read :: s_comm_read_ack :: s_comm_prestop :: 
+      s_comm_stop :: Nil) = Enum(UInt(), 11)
+  val comm_state = Reg(init = s_comm_idle)
+  val data_buffer = Reg(init = UInt(0, 8.W))
+  val data_cnt = Reg(init = UInt(0, 3.W))
+
+  // Main FSM
   switch(main_state) {
     is(s_main_idle) {
       when(ctrl_status.start) {
@@ -117,10 +125,9 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
       }
     }
     is(s_main_acquire) {
-      main_state := s_main_wait
-    }
-    is(s_main_wait) {
-      main_state := s_main_done
+      when(comm_state === s_comm_stop && freq_div + 1.U === 0.U) { 
+        main_state := s_main_done
+      }
     }
     is(s_main_done) {
       ctrl_status.done := true.B
@@ -129,58 +136,51 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
   }
 
   // PMBus FSM
-  val (s_comm_idle :: s_comm_start :: s_comm_addr :: s_comm_addr_ack :: s_comm_data :: 
-      s_comm_data_ack :: s_comm_wait :: s_comm_read :: s_comm_read_ack :: s_comm_stop :: Nil) = Enum(UInt(), 10)
-  val comm_state = Reg(init = s_comm_idle)
-  val data_buffer = Reg(init = UInt(0, 8.W))
-  val data_cnt = Reg(init = UInt(0, 3.W))
-
   switch(comm_state) {
     is(s_comm_idle) {
       when(main_state === s_main_acquire) {
         pmbus_clk := true.B
         pmbus_data := false.B
-        data_buffer := ctrl_status.slave_addr
+        data_buffer := Cat(ctrl_status.slave_addr(6,0), UInt(0, 1.W))
         comm_state := s_comm_start
       }
     }
     is(s_comm_start) {
       when(!pmbus_clk) {
-        pmbus_data := data_buffer(0)
+        pmbus_data := data_buffer(7)
         comm_state := s_comm_addr
       }
     }
     is(s_comm_addr) {
       when(freq_div + 1.U === 0.U && pmbus_clk) {
-        data_buffer := Cat(UInt(0, 1.W), data_buffer(7,1))
+        data_buffer := Cat(data_buffer(6,0), UInt(0, 1.W))
         data_cnt := data_cnt + 1.U
-        when(data_cnt + 1.U === 7.U) {
+        when(data_cnt + 1.U === 0.U) {
           data_buffer := cmd_read_pout
           comm_state := s_comm_addr_ack
           pmbus_data := true.B
-          data_cnt := 0.U
         }.otherwise {
-          pmbus_data := data_buffer(1)
+          pmbus_data := data_buffer(6)
         }
       }
     }
     is(s_comm_addr_ack) {
       when(freq_div + 1.U === 0.U && pmbus_clk) {
         when(!port.data.in) {
-          pmbus_data := data_buffer(0)
+          pmbus_data := data_buffer(7)
           comm_state := s_comm_data
-        }.otherwise { comm_state := s_comm_stop }
+        }.otherwise { comm_state := s_comm_prestop }
       }
     }
     is(s_comm_data) {
       when(freq_div + 1.U === 0.U && pmbus_clk) {
-        data_buffer := Cat(UInt(0, 1.W), data_buffer(7,1))
+        data_buffer := Cat(data_buffer(6,0), UInt(0, 1.W))
         data_cnt := data_cnt + 1.U
         when(data_cnt + 1.U === 0.U) {
           comm_state := s_comm_data_ack
           pmbus_data := true.B
         }.otherwise {
-          pmbus_data := data_buffer(1)
+          pmbus_data := data_buffer(6)
         }
       }
     }
@@ -189,46 +189,53 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
         when(!port.data.in) {
           pmbus_data := true.B
           comm_state := s_comm_wait
-        }.otherwise { comm_state := s_comm_stop }
+        }.otherwise { comm_state := s_comm_prestop }
       }
     }
     is(s_comm_wait) {
-      when(freq_div + 1.U === 0.U && pmbus_clk) {
+      when(freq_div + 1.U === 0.U) {
         data_cnt := data_cnt + 1.U
-        when(data_cnt + 1.U === 0.U) { comm_state :=  s_comm_read}
+        when(data_cnt + 1.U === 0.U) { comm_state :=  s_comm_read }
       }
     }
     is(s_comm_read) {
       when(freq_div + 1.U === 0.U && pmbus_clk) {
         data_buffer := Cat(data_buffer(6,0), port.data.in)
         data_cnt := data_cnt + 1.U
-        when(data_cnt + 1.U === 0.U) { 
+        when(data_cnt + 1.U === 0.U) {
           pmbus_data := false.B
           comm_state :=  s_comm_read_ack
         }
       }
     }
     is(s_comm_read_ack) {
-      when(freq_div + 1.U === 0.U && pmbus_clk) {
-        pmbus_clk := true.B 
-        comm_state := s_comm_stop
+      when(freq_div + 1.U === 0.U && pmbus_clk) { 
+        comm_state := s_comm_prestop
       }
     }
+    is(s_comm_prestop) {
+      pmbus_clk := false.B
+      pmbus_data := false.B
+      when(freq_div + 1.U === 0.U) { comm_state := s_comm_stop }
+    }
     is(s_comm_stop) {
-      when(freq_div + 1.U === 0.U && pmbus_clk) {
-        pmbus_data := true.B
+        pmbus_clk := true.B
+        pmbus_data := false.B
+      when(freq_div + 1.U === 0.U) {
         comm_state := s_comm_idle
+        pmbus_data := true.B
       }
     }
   }
 
   // PMBus frequency generator
   val clk_en = comm_state === s_comm_start || comm_state === s_comm_addr || comm_state === s_comm_addr_ack || 
-               comm_state === s_comm_data || comm_state === s_comm_data_ack
+               comm_state === s_comm_data || comm_state === s_comm_data_ack || comm_state === s_comm_read || 
+               comm_state === s_comm_read_ack
 
-  when(clk_en) { 
+  when(comm_state =/= s_comm_idle) { 
     freq_div := freq_div + 1.U
-    when(freq_div + 1.U === 0.U) { pmbus_clk := !pmbus_clk }
+    when(clk_en && freq_div + 1.U === 0.U) { pmbus_clk := !pmbus_clk }
   }
 
   // CSR mapping
