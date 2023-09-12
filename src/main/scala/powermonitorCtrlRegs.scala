@@ -38,7 +38,9 @@ package powermonitor
 
 object PowerMonitorCtrlRegs {
   val prescaler   = 0x00  // sampling frequency prescaler register
-  val ctrl_status = 0x04  // control register
-  val data_addr   = 0x08  // data address in the internal memory
-  val data        = 0x0c  // data value with the power consuption
+  val slave_addr  = 0x04  // slave PMBus address
+  val command     = 0x08  // PMBus command
+  val ctrl_status = 0x0C  // control register
+  val data_addr   = 0x10  // data address in the internal memory
+  val data        = 0x14  // data value with the power consuption
 }
