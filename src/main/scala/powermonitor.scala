@@ -233,7 +233,7 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
         data_buffer := Cat(data_buffer(6,0), port.data.in)
         data_cnt := data_cnt + 1.U
         when(data_cnt + 1.U === 0.U) {
-          pmbus_data := false.B
+          // pmbus_data := false.B
           comm_state :=  s_comm_read_hi_ack
         }
       }
@@ -242,16 +242,18 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
       when(terminal_cnt && port.clk.in) { 
         comm_state := s_comm_prestop
         data := Cat(data_buffer, data(7,0))
+        // pmbus_data := true.B
       }
     }
     is(s_comm_prestop) {
       pmbus_clk := false.B
       pmbus_data := false.B
-      when(terminal_cnt) { comm_state := s_comm_stop }
+      /*when(freq_div + 1.U === (cnt_max/2).U) {
+        pmbus_data := false.B
+      }.else*/ when(terminal_cnt) { comm_state := s_comm_stop }
     }
     is(s_comm_stop) {
         pmbus_clk := true.B
-        pmbus_data := false.B
       when(terminal_cnt) {
         comm_state := s_comm_idle
         pmbus_data := true.B
