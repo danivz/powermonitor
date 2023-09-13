@@ -43,4 +43,5 @@ object PowerMonitorCtrlRegs {
   val ctrl_status = 0x0C  // control register
   val data_addr   = 0x10  // data address in the internal memory
   val data        = 0x14  // data value with the power consuption
+  val samples     = 0x18  // number of samples acquired
 }

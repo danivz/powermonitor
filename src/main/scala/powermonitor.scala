@@ -80,15 +80,19 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
   lazy val module = new LazyModuleImp(this) {
 
   val cnt_max = params.clockFreqMHz * 5
-  val freq_div = Reg(init = UInt(0, log2Ceil(cnt_max).W))
+  val freq_div_comm = Reg(init = UInt(0, log2Ceil(cnt_max).W))
+  val freq_div_sampler = Reg(init = UInt(0, 32.W))
+  val freq_div_error = Reg(init = UInt(0, log2Ceil(3*cnt_max).W))
+  val memory = Mem(params.maxSamples, UInt(16.W))
 
   // CSR
-  val prescaler = Reg(init = UInt(0x0000FFFF, 32.W))
+  val prescaler = Reg(init = UInt(0x03FFFFFF, 32.W))
   val slave_addr = Reg(init = UInt(0, 8.W))
   val command = Reg(init = UInt(0, 8.W))
   val ctrl_status = Reg(init = UInt(0, 8.W))
   val data_addr = Reg(init = UInt(0, 16.W))
   val data = Reg(init = UInt(0, 16.W))
+  val samples = Reg(init = UInt(0, 16.W))
 
   // Outputs
   val pmbus_clk = Reg(init = true.B)
@@ -99,7 +103,7 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
   port.data.out := false.B
 
   // FSMs
-  val s_main_idle :: s_main_acquire :: s_main_done :: Nil = Enum(UInt(), 3)
+  val s_main_idle :: s_main_acquire :: s_main_wait :: s_main_error :: Nil = Enum(UInt(), 4)
   val main_state = Reg(init = s_main_idle)
 
   val (s_comm_idle :: s_comm_start :: s_comm_addr_wr :: s_comm_addr_wr_ack :: s_comm_command ::
@@ -107,28 +111,66 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
       s_comm_read_lo :: s_comm_read_lo_ack :: s_comm_read_hi :: s_comm_read_hi_ack ::
       s_comm_prestop :: s_comm_stop :: Nil) = Enum(UInt(), 15)
   val comm_state = Reg(init = s_comm_idle)
+
+  val error = Reg(init = UInt(0, 2.W))
   val data_buffer = Reg(init = UInt(0, 8.W))
+  val data_aux = Reg(init = UInt(0, 16.W))
   val data_cnt = Reg(init = UInt(0, 3.W))
-  val terminal_cnt = freq_div + 1.U === cnt_max.U
+  val terminal_cnt_sampler = freq_div_sampler + 1.U === prescaler
+  val terminal_cnt_comm = freq_div_comm + 1.U === cnt_max.U
+  val terminal_cnt_error = freq_div_error + 1.U === (3*cnt_max).U
 
   // Main FSM
   switch(main_state) {
     is(s_main_idle) {
       when(ctrl_status(0)) {
-        ctrl_status := ctrl_status & 0xFC.U
+        ctrl_status := 0.U
+        samples := 0.U
         main_state := s_main_acquire
       }
     }
     is(s_main_acquire) {
-      when(comm_state === s_comm_stop && terminal_cnt) { 
-        main_state := s_main_done
+      when(comm_state === s_comm_stop && terminal_cnt_comm) { 
+        when(error =/= 0.U) {
+          ctrl_status := Cat(error, UInt(0x06, 4.W))
+          main_state := s_main_error
+        }.elsewhen(ctrl_status(0)) {
+          ctrl_status := 0x02.U
+          main_state := s_main_idle
+        }.otherwise { 
+          memory.write(samples, data_aux)
+          main_state := s_main_wait
+        }
       }
     }
-    is(s_main_done) {
-      ctrl_status := ctrl_status | 0x02.U
-      main_state := s_main_idle
+    is(s_main_wait) {
+      when(samples + 1.U === params.maxSamples.U) {
+        ctrl_status := 0x02.U
+        main_state := s_main_idle 
+      }.elsewhen(terminal_cnt_sampler) { 
+        samples := samples + 1.U
+        main_state := s_main_acquire
+      }
+    }
+    is(s_main_error) {
+      when(terminal_cnt_error) { main_state := s_main_acquire }
     }
   }
+
+  when(main_state =/= s_main_idle) {
+    when(terminal_cnt_sampler) { freq_div_sampler := 0.U }
+    .otherwise { freq_div_sampler := freq_div_sampler + 1.U }
+  }
+
+  when(main_state === s_main_error) {
+    when(terminal_cnt_error) {
+      freq_div_error := 0.U
+    }.otherwise {
+      freq_div_error := freq_div_error + 1.U
+    }
+  }
+
+  data := memory.read(data_addr)
 
   // PMBus FSM
   switch(comm_state) {
@@ -137,6 +179,7 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
         pmbus_clk := true.B
         pmbus_data := false.B
         data_buffer := Cat(slave_addr, UInt(0, 1.W))
+        error := 0.U
         comm_state := s_comm_start
       }
     }
@@ -147,7 +190,7 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
       }
     }
     is(s_comm_addr_wr) {
-      when(terminal_cnt && port.clk.in) {
+      when(terminal_cnt_comm && port.clk.in) {
         data_buffer := Cat(data_buffer(6,0), UInt(0, 1.W))
         data_cnt := data_cnt + 1.U
         when(data_cnt + 1.U === 0.U) {
@@ -160,15 +203,18 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
       }
     }
     is(s_comm_addr_wr_ack) {
-      when(terminal_cnt && port.clk.in) {
+      when(terminal_cnt_comm && port.clk.in) {
         when(!port.data.in) {
           pmbus_data := data_buffer(7)
           comm_state := s_comm_command
-        }.otherwise { comm_state := s_comm_prestop }
+        }.otherwise { 
+          comm_state := s_comm_prestop
+          error := 1.U
+        }
       }
     }
     is(s_comm_command) {
-      when(terminal_cnt && port.clk.in) {
+      when(terminal_cnt_comm && port.clk.in) {
         data_buffer := Cat(data_buffer(6,0), UInt(0, 1.W))
         data_cnt := data_cnt + 1.U
         when(data_cnt + 1.U === 0.U) {
@@ -180,20 +226,23 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
       }
     }
     is(s_comm_command_ack) {
-      when(terminal_cnt && port.clk.in) {
+      when(terminal_cnt_comm && port.clk.in) {
         when(!port.data.in) {
           comm_state := s_comm_reap_start
           data_buffer := Cat(slave_addr, UInt(1, 1.W))
-        }.otherwise { comm_state := s_comm_prestop }
+        }.otherwise { 
+          comm_state := s_comm_prestop
+          error := 2.U
+        }
       }
     }
     is(s_comm_reap_start) {
-      when(freq_div + 1.U === (cnt_max/2).U && port.clk.in) {
+      when(freq_div_comm + 1.U === (cnt_max/2).U && port.clk.in) {
         pmbus_data := false.B
-      }.elsewhen(terminal_cnt && port.clk.in) { comm_state := s_comm_addr_rd }
+      }.elsewhen(terminal_cnt_comm && port.clk.in) { comm_state := s_comm_addr_rd }
     }
     is(s_comm_addr_rd) {
-      when(terminal_cnt && port.clk.in) {
+      when(terminal_cnt_comm && port.clk.in) {
         data_buffer := Cat(data_buffer(6,0), UInt(0, 1.W))
         data_cnt := data_cnt + 1.U
         when(data_cnt + 1.U === 0.U) {
@@ -205,14 +254,17 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
       }
     }
     is(s_comm_addr_rd_ack) {
-      when(terminal_cnt && port.clk.in) {
+      when(terminal_cnt_comm && port.clk.in) {
         when(!port.data.in) {
           comm_state := s_comm_read_lo
-        }.otherwise { comm_state := s_comm_prestop }
+        }.otherwise { 
+          comm_state := s_comm_prestop
+          error := 3.U
+        }
       }
     }
     is(s_comm_read_lo) {
-      when(terminal_cnt && port.clk.in) {
+      when(terminal_cnt_comm && port.clk.in) {
         data_buffer := Cat(data_buffer(6,0), port.data.in)
         data_cnt := data_cnt + 1.U
         when(data_cnt + 1.U === 0.U) {
@@ -222,39 +274,35 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
       }
     }
     is(s_comm_read_lo_ack) {
-      when(terminal_cnt && port.clk.in) { 
+      when(terminal_cnt_comm && port.clk.in) { 
         comm_state := s_comm_read_hi
-        data := data_buffer
+        data_aux := data_buffer
         pmbus_data := true.B
       }
     }
     is(s_comm_read_hi) {
-      when(terminal_cnt && port.clk.in) {
+      when(terminal_cnt_comm && port.clk.in) {
         data_buffer := Cat(data_buffer(6,0), port.data.in)
         data_cnt := data_cnt + 1.U
         when(data_cnt + 1.U === 0.U) {
-          // pmbus_data := false.B
           comm_state :=  s_comm_read_hi_ack
         }
       }
     }
     is(s_comm_read_hi_ack) {
-      when(terminal_cnt && port.clk.in) { 
+      when(terminal_cnt_comm && port.clk.in) { 
         comm_state := s_comm_prestop
-        data := Cat(data_buffer, data(7,0))
-        // pmbus_data := true.B
+        data_aux := Cat(data_buffer, data_aux(7,0))
       }
     }
     is(s_comm_prestop) {
       pmbus_clk := false.B
       pmbus_data := false.B
-      /*when(freq_div + 1.U === (cnt_max/2).U) {
-        pmbus_data := false.B
-      }.else*/ when(terminal_cnt) { comm_state := s_comm_stop }
+      when(terminal_cnt_comm) { comm_state := s_comm_stop }
     }
     is(s_comm_stop) {
         pmbus_clk := true.B
-      when(terminal_cnt) {
+      when(terminal_cnt_comm) {
         comm_state := s_comm_idle
         pmbus_data := true.B
       }
@@ -268,9 +316,9 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
                comm_state === s_comm_read_lo_ack || comm_state === s_comm_read_hi || comm_state === s_comm_read_hi_ack
 
   when(comm_state =/= s_comm_idle) {
-    when((pmbus_clk && port.clk.in) || !pmbus_clk) { freq_div := freq_div + 1.U }
-    when(terminal_cnt) {
-      freq_div := 0.U
+    when((pmbus_clk && port.clk.in) || !pmbus_clk) { freq_div_comm := freq_div_comm + 1.U }
+    when(terminal_cnt_comm) {
+      freq_div_comm := 0.U
       when(clk_en) { pmbus_clk := !pmbus_clk }
     }
   }
@@ -288,7 +336,9 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
     PowerMonitorCtrlRegs.data_addr -> Seq(RegField(16, data_addr, 
         RegFieldDesc("data_addr", "PowerMonitor memory address", reset=Some(0)))),
     PowerMonitorCtrlRegs.data -> Seq(RegField(16, data, 
-        RegFieldDesc("data", "PowerMonitor data value readed with PMBus", reset=Some(0))))
+        RegFieldDesc("data", "PowerMonitor data value readed with PMBus", reset=Some(0)))),
+    PowerMonitorCtrlRegs.samples -> Seq(RegField(16, samples, 
+        RegFieldDesc("samples", "PowerMonitor number of samples to read", reset=Some(0))))
   )
   
   interrupts(0) := false.B
