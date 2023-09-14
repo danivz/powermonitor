@@ -83,7 +83,7 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
   val freq_div_comm = Reg(init = UInt(0, log2Ceil(cnt_max).W))
   val freq_div_sampler = Reg(init = UInt(0, 32.W))
   val freq_div_error = Reg(init = UInt(0, log2Ceil(3*cnt_max).W))
-  val memory = Mem(params.maxSamples, UInt(16.W))
+  val memory = SeqMem(params.maxSamples, UInt(16.W))
 
   // CSR
   val prescaler = Reg(init = UInt(0x03FFFFFF, 32.W))
@@ -112,7 +112,7 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
       s_comm_prestop :: s_comm_stop :: Nil) = Enum(UInt(), 15)
   val comm_state = Reg(init = s_comm_idle)
 
-  val error = Reg(init = UInt(0, 2.W))
+  val error = Reg(init = false.B)
   val data_buffer = Reg(init = UInt(0, 8.W))
   val data_aux = Reg(init = UInt(0, 16.W))
   val data_cnt = Reg(init = UInt(0, 3.W))
@@ -131,8 +131,8 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
     }
     is(s_main_acquire) {
       when(comm_state === s_comm_stop && terminal_cnt_comm) { 
-        when(error =/= 0.U) {
-          ctrl_status := Cat(error, UInt(0x06, 4.W))
+        when(error) {
+          ctrl_status := 0x06.U
           main_state := s_main_error
         }.elsewhen(ctrl_status(0)) {
           ctrl_status := 0x02.U
@@ -179,7 +179,7 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
         pmbus_clk := true.B
         pmbus_data := false.B
         data_buffer := Cat(slave_addr, UInt(0, 1.W))
-        error := 0.U
+        error := false.B
         comm_state := s_comm_start
       }
     }
@@ -209,7 +209,7 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
           comm_state := s_comm_command
         }.otherwise { 
           comm_state := s_comm_prestop
-          error := 1.U
+          error := true.B
         }
       }
     }
@@ -232,7 +232,7 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
           data_buffer := Cat(slave_addr, UInt(1, 1.W))
         }.otherwise { 
           comm_state := s_comm_prestop
-          error := 2.U
+          error := true.B
         }
       }
     }
@@ -259,7 +259,7 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
           comm_state := s_comm_read_lo
         }.otherwise { 
           comm_state := s_comm_prestop
-          error := 3.U
+          error := true.B
         }
       }
     }
