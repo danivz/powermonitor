@@ -44,4 +44,5 @@ object PowerMonitorCtrlRegs {
   val data_addr   = 0x10  // data address in the internal memory
   val data        = 0x14  // data value with the power consuption
   val samples     = 0x18  // number of samples acquired
+  val errors      = 0x1C  // number of errors
 }

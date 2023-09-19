@@ -93,6 +93,7 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
   val data_addr = Reg(init = UInt(0, 16.W))
   val data = Reg(init = UInt(0, 16.W))
   val samples = Reg(init = UInt(0, 16.W))
+  val errors = Reg(init = UInt(0, 16.W))
 
   // Outputs
   val pmbus_clk = Reg(init = true.B)
@@ -126,13 +127,14 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
       when(ctrl_status(0)) {
         ctrl_status := 0.U
         samples := 0.U
+        errors := 0.U
         main_state := s_main_acquire
       }
     }
     is(s_main_acquire) {
       when(comm_state === s_comm_stop && terminal_cnt_comm) { 
         when(error) {
-          ctrl_status := 0x06.U
+          errors := errors + 1.U
           main_state := s_main_error
         }.elsewhen(ctrl_status(0)) {
           ctrl_status := 0x02.U
@@ -338,7 +340,9 @@ abstract class PowerMonitor(busWidthBytes: Int, params: PowerMonitorParams)(impl
     PowerMonitorCtrlRegs.data -> Seq(RegField(16, data, 
         RegFieldDesc("data", "PowerMonitor data value readed with PMBus", reset=Some(0)))),
     PowerMonitorCtrlRegs.samples -> Seq(RegField(16, samples, 
-        RegFieldDesc("samples", "PowerMonitor number of samples to read", reset=Some(0))))
+        RegFieldDesc("samples", "PowerMonitor number of samples to read", reset=Some(0)))),
+    PowerMonitorCtrlRegs.errors -> Seq(RegField(16, errors, 
+        RegFieldDesc("errors", "PowerMonitor number of errors in execution", reset=Some(0))))
   )
   
   interrupts(0) := false.B
